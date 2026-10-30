@@ -4,6 +4,7 @@ import sys
 import time
 import uuid
 import asyncio
+import hashlib
 import secrets
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query, HTTPException, Depends
@@ -22,12 +23,28 @@ API_KEY = os.environ.get("API_KEY", "changeme")
 PORT    = int(os.environ.get("PORT", 10000))
 HOST    = os.environ.get("HOST", "0.0.0.0")
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
+
+
+def _expected_key() -> str:
+    # Read on every request so an env change never needs a code change.
+    return os.environ.get("API_KEY", "changeme")
+
+
+def _sha8(s: str) -> str:
+    return hashlib.sha256(s.encode()).hexdigest()[:8]
+
 
 def verify_key(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    if not secrets.compare_digest(credentials.credentials, API_KEY):
+    expected = _expected_key()
+    got = credentials.credentials if credentials else ""
+    if not secrets.compare_digest(got.encode(), expected.encode()):
+        logger.warning(
+            f"[auth] reject got_sha8={_sha8(got)} got_len={len(got)} "
+            f"expected_sha8={_sha8(expected)} expected_len={len(expected)}"
+        )
         raise HTTPException(status_code=401, detail="Invalid API key")
-    return credentials.credentials
+    return got
 
 
 # ── Solver ───────────────────────────────────────────────────────────────────
@@ -75,6 +92,8 @@ class TurnstileSolver:
     async def _startup(self):
         # Returns immediately so the HTTP server binds its port right away.
         logger.info("HTTP server starting (browser boots lazily on demand)…")
+        _k = _expected_key()
+        logger.info(f"[auth] expected key sha8={_sha8(_k)} len={len(_k)}")
         asyncio.create_task(self._cleanup_results())
         if os.environ.get("PREWARM", "").lower() in ("1", "true", "yes"):
             asyncio.create_task(self._ensure_browser())
