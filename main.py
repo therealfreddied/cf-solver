@@ -57,6 +57,13 @@ class TurnstileSolver:
         self.results: dict = {}
         self.context = None
 
+        # Lazy, non-blocking browser boot.
+        # uvicorn MUST bind the port immediately or Render's port scanner
+        # times out and kills the container before it ever goes live.
+        self.ready = asyncio.Event()
+        self._boot_lock = asyncio.Lock()
+        self.boot_error: str | None = None
+
         # Single-threaded: exactly 1 browser context, 1 page
         self.app.add_api_route("/",          self.health,             methods=["GET"])
         self.app.add_api_route("/turnstile",  self.process_turnstile,  methods=["GET"])
@@ -66,25 +73,52 @@ class TurnstileSolver:
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
     async def _startup(self):
-        logger.info("Starting headless Camoufox browser (single-thread mode)…")
-        self.camoufox_ctx = AsyncCamoufox(
-            headless=True,
-            exclude_addons=[DefaultAddons.UBO],
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                # Memory reduction flags
-                "--memory-pressure-off",
-                "--max_old_space_size=300",
-            ],
-        )
-        self.browser = await self.camoufox_ctx.start()
-        self.context = await self.browser.new_context()
-        page = await self.context.new_page()
-        await self.page_pool.put(page)
+        # Returns immediately so the HTTP server binds its port right away.
+        logger.info("HTTP server starting (browser boots lazily on demand)…")
         asyncio.create_task(self._cleanup_results())
-        logger.success("Browser ready — 1 page in pool")
+        if os.environ.get("PREWARM", "").lower() in ("1", "true", "yes"):
+            asyncio.create_task(self._ensure_browser())
+
+    async def _ensure_browser(self):
+        """Boot Camoufox once, on demand. Safe to call concurrently."""
+        if self.ready.is_set():
+            return
+        async with self._boot_lock:
+            if self.ready.is_set():
+                return
+            logger.info("Starting headless Camoufox browser (single-thread mode)…")
+            self.camoufox_ctx = AsyncCamoufox(
+                headless=True,
+                humanize=False,
+                exclude_addons=[DefaultAddons.UBO],
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--memory-pressure-off",
+                ],
+            )
+            self.browser = await self.camoufox_ctx.start()
+            self.context = await self.browser.new_context()
+            page = await self.context.new_page()
+            await self.page_pool.put(page)
+            self.boot_error = None
+            self.ready.set()
+            logger.success("Browser ready — 1 page in pool")
+
+    async def _acquire_page(self, timeout=180):
+        """Boot the browser if needed, then lease the single page."""
+        try:
+            await asyncio.wait_for(self._ensure_browser(), timeout=timeout)
+        except asyncio.TimeoutError:
+            self.boot_error = "browser boot timeout"
+            raise
+        except Exception as e:
+            self.boot_error = f"{type(e).__name__}: {e}"
+            logger.error(f"[Boot] {self.boot_error}")
+            raise
+        return await asyncio.wait_for(self.page_pool.get(), timeout=120)
 
     async def _shutdown(self):
         try:
@@ -96,13 +130,26 @@ class TurnstileSolver:
     # ── Health ───────────────────────────────────────────────────────────────
 
     async def health(self):
-        return JSONResponse({"status": "ok", "pages_ready": self.page_pool.qsize()})
+        # Always 200 and instant — this is what FleetPinger hits to keep the
+        # free instance from sleeping. Browser state is reported, not required.
+        return JSONResponse({
+            "status": "ok",
+            "browser_ready": self.ready.is_set(),
+            "pages_ready": self.page_pool.qsize(),
+            "boot_error": self.boot_error,
+        })
 
     # ── Turnstile ────────────────────────────────────────────────────────────
 
     async def _solve_turnstile(self, task_id, url, sitekey, action=None, cdata=None):
         start = time.time()
-        page = await self.page_pool.get()
+        try:
+            page = await self._acquire_page()
+        except Exception as e:
+            elapsed = round(time.time() - start, 3)
+            self.results[task_id] = {"status": "error", "elapsed_time": elapsed, "value": f"browser_unavailable: {e}"}
+            logger.error(f"[Turnstile] no browser {task_id}: {e}")
+            return
         try:
             url_slash = url if url.endswith("/") else url + "/"
             div = (
@@ -175,7 +222,13 @@ class TurnstileSolver:
 
     async def _solve_clearance(self, task_id, url, timeout=30):
         start = time.time()
-        page = await self.page_pool.get()
+        try:
+            page = await self._acquire_page()
+        except Exception as e:
+            elapsed = round(time.time() - start, 3)
+            self.results[task_id] = {"status": "error", "elapsed_time": elapsed, "value": f"browser_unavailable: {e}"}
+            logger.error(f"[Clearance] no browser {task_id}: {e}")
+            return
         try:
             ua = await page.evaluate("navigator.userAgent")
             await page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
