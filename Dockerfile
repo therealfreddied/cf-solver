@@ -19,6 +19,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN python3 -m camoufox fetch
 
 COPY main.py .
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
 
 # PORT is injected by Render; fallback 10000 for local testing
 ENV HOST=0.0.0.0 \
@@ -26,4 +28,4 @@ ENV HOST=0.0.0.0 \
 
 EXPOSE 10000
 
-CMD ["python3", "main.py"]
+CMD ["./entrypoint.sh"]
