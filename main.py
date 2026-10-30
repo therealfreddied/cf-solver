@@ -231,6 +231,11 @@ class TurnstileSolver:
                     "network.predictor.enabled": False,
                     "network.http.max-connections": 6,
                     "network.http.speculative-parallel-limit": 0,
+                    # -- QUIC/HTTP3 off: this is almost certainly what Render
+                    #    logs as "Detected new open ports UDP:*". We never
+                    #    need it for a challenge solve page.
+                    "network.http.http3.enable": False,
+                    "network.http.http3.enabled": False,
                     # -- WebRTC off: it was opening stray UDP ports on
                     #    Render ("Detected new open ports UDP:43653") --
                     "media.peerconnection.enabled": False,
@@ -271,6 +276,19 @@ class TurnstileSolver:
                 page = await self.context.new_page()
                 logger.info(f"[Boot] step=page(new) t={time.time()-t0:.1f}s {_mem()}")
             await self.page_pool.put(page)
+            # Prove the prefs actually reached the browser. With
+            # media.peerconnection.enabled=False, RTCPeerConnection should be
+            # absent. This also tells us whether the UDP ports Render logs are
+            # WebRTC (prefs ignored) or QUIC (prefs fine).
+            try:
+                probe = await page.evaluate(
+                    "() => ({webrtc: typeof RTCPeerConnection, "
+                    "ua: navigator.userAgent.slice(0, 40), "
+                    "hwc: navigator.hardwareConcurrency})"
+                )
+                logger.info(f"[Boot] prefprobe {probe}")
+            except Exception as pe:
+                logger.warning(f"[Boot] prefprobe failed: {pe}")
             self.boot_error = None
             self.ready.set()
             logger.success(f"[Boot] ready t={time.time()-t0:.1f}s {_mem()}")
