@@ -198,34 +198,57 @@ class TurnstileSolver:
                     "dom.ipc.processCount.privilegedabout": 1,
                     "fission.autostart": False,
                     "fission.webContentIsolationStrategy": 0,
+                    # -- kill e10s / extra content processes outright.
+                    #    Observed: creating ONE about:blank page cost +189MB,
+                    #    meaning additional renderer processes spawn per page.
+                    #    These disable the multi-process model entirely.
+                    "browser.tabs.remote.autostart": False,
+                    "browser.tabs.remote.autostart.2": False,
+                    "browser.tabs.remote.disabled-for-a11y": True,
+                    "extensions.e10sBlocksEnabling": False,
+                    "extensions.e10s.rollout.skipTier1": True,
+                    "dom.ipc.multiOptOut": True,
                     # -- software rendering only, no GPU paths --
                     "gfx.webrender.software": True,
                     "gfx.webrender.all": False,
                     "layers.acceleration.disabled": True,
                     "gfx.canvas.accelerated": False,
+                    "webgl.disabled": True,
                     # -- shrink caches (we solve, we don't browse) --
-                    "browser.cache.memory.capacity": 8192,
+                    "browser.cache.memory.capacity": 4096,
                     "browser.cache.disk.enable": False,
                     "browser.cache.offline.enable": False,
-                    "media.memory_cache_max_size": 8192,
-                    "image.mem.max_decoded_image_kb": 32768,
-                    "image.mem.surfacecache.max_size_kb": 32768,
+                    "browser.cache.memory.enable": True,
+                    "media.memory_cache_max_size": 4096,
+                    "image.mem.max_decoded_image_kb": 16384,
+                    "image.mem.surfacecache.max_size_kb": 16384,
+                    "image.cache.size": 2048,
+                    "browser.sessionhistory.max_total_viewers": 0,
+                    "browser.sessionhistory.max_entries": 5,
                     # -- no speculative network work --
                     "network.prefetch-next": False,
                     "network.dns.disablePrefetch": True,
                     "network.predictor.enabled": False,
                     "network.http.max-connections": 6,
+                    "network.http.speculative-parallel-limit": 0,
                     # -- WebRTC off: it was opening stray UDP ports on
                     #    Render ("Detected new open ports UDP:43653") --
                     "media.peerconnection.enabled": False,
                     "media.navigator.enabled": False,
+                    "media.autoplay.default": 5,
+                    "media.autoplay.blocking_policy": 2,
                     # -- pure background noise we never use --
                     "browser.sessionstore.resume_from_crash": False,
+                    "browser.sessionstore.max_tabs_undo": 0,
                     "browser.safebrowsing.malware.enabled": False,
                     "browser.safebrowsing.phishing.enabled": False,
                     "toolkit.telemetry.enabled": False,
                     "datareporting.healthreport.uploadEnabled": False,
                     "browser.newtabpage.enabled": False,
+                    "browser.newtabpage.activity-stream.feeds.telemetry": False,
+                    "dom.serviceWorkers.enabled": False,
+                    "javascript.options.mem.gc_allocation_threshold_mb": 64,
+                    "javascript.options.mem.high_water_mark": 32,
                 },
             )
             self.browser = await self.camoufox_ctx.start()
