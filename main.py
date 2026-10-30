@@ -253,10 +253,23 @@ class TurnstileSolver:
             )
             self.browser = await self.camoufox_ctx.start()
             logger.info(f"[Boot] step=browser_up t={time.time()-t0:.1f}s {_mem()}")
-            self.context = await self.browser.new_context()
-            logger.info(f"[Boot] step=context t={time.time()-t0:.1f}s {_mem()}")
-            page = await self.context.new_page()
-            logger.info(f"[Boot] step=page t={time.time()-t0:.1f}s {_mem()}")
+            # Reuse the browser's default context instead of creating a new one.
+            # Measured: creating a fresh context + page cost +170MB on this
+            # 512MB box, because Playwright spins up another process tree.
+            # The default context already exists, so this is ~free.
+            if getattr(self.browser, "contexts", None):
+                self.context = self.browser.contexts[0]
+                logger.info(f"[Boot] step=context(reused) t={time.time()-t0:.1f}s {_mem()}")
+            else:
+                self.context = await self.browser.new_context()
+                logger.info(f"[Boot] step=context(new) t={time.time()-t0:.1f}s {_mem()}")
+            existing = getattr(self.context, "pages", None) or []
+            if existing:
+                page = existing[0]
+                logger.info(f"[Boot] step=page(reused) t={time.time()-t0:.1f}s {_mem()}")
+            else:
+                page = await self.context.new_page()
+                logger.info(f"[Boot] step=page(new) t={time.time()-t0:.1f}s {_mem()}")
             await self.page_pool.put(page)
             self.boot_error = None
             self.ready.set()
