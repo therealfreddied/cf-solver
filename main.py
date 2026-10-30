@@ -35,16 +35,56 @@ def _sha8(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()[:8]
 
 
-def _rss_mb() -> int:
-    """Current process RSS in MB — cheap OOM visibility on a 512MB box."""
+def _total_rss_mb() -> int:
+    """RSS summed across ALL processes in this container.
+
+    Firefox is multi-process, so /proc/self alone hides most of the real
+    footprint. Inside a container PID namespace this is the true total.
+    """
+    total = 0
     try:
-        with open("/proc/self/status") as f:
-            for line in f:
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) // 1024
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open(f"/proc/{pid}/status") as f:
+                    for line in f:
+                        if line.startswith("VmRSS:"):
+                            total += int(line.split()[1])
+                            break
+            except Exception:
+                continue
     except Exception:
-        pass
-    return -1
+        return -1
+    return total // 1024
+
+
+def _total_pss_mb() -> int:
+    """PSS across all processes — the honest number (shared pages counted once).
+
+    RSS double-counts shared libraries between Firefox processes, which makes
+    it read far worse than the cgroup actually sees. PSS is what matters.
+    """
+    total = 0
+    try:
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open(f"/proc/{pid}/smaps_rollup") as f:
+                    for line in f:
+                        if line.startswith("Pss:"):
+                            total += int(line.split()[1])
+                            break
+            except Exception:
+                continue
+    except Exception:
+        return -1
+    return total // 1024
+
+
+def _mem() -> str:
+    return f"pss={_total_pss_mb()}MB rss_all={_total_rss_mb()}MB py={_rss_mb()}MB"
 
 
 def verify_key(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -123,30 +163,69 @@ class TurnstileSolver:
                 headless=True,
                 humanize=False,
                 exclude_addons=[DefaultAddons.UBO],
-                # Render blocks unprivileged user namespaces, so Firefox's
-                # content sandbox cannot init (/proc/self/uid_map: EPERM) and
-                # renderer children SIGSEGV. Disable it via real Firefox prefs
-                # (--no-sandbox is a Chromium flag Firefox ignores).
+                # ── Memory tuning for a 512MB / 0.1 vCPU container ──────────
+                # Two separate problems addressed here:
+                #   (a) Firefox detects 8 host CPUs and spawns one content
+                #       process per core — pure waste on 0.1 vCPU, and the
+                #       single biggest avoidable RAM cost.
+                #   (b) Render blocks unprivileged user namespaces, so the
+                #       content sandbox cannot init (/proc/self/uid_map:
+                #       EPERM) and renderer children SIGSEGV.
+                # NOTE: --no-sandbox / --disable-dev-shm-usage are Chromium
+                # flags that Firefox ignores; real control is via prefs.
                 firefox_user_prefs={
+                    # -- sandbox off (required on Render) --
                     "security.sandbox.content.level": 0,
                     "security.sandbox.gpu.level": 0,
                     "security.sandbox.socket.process.level": 0,
+                    # -- collapse to ONE content process --
+                    "dom.ipc.processCount": 1,
+                    "dom.ipc.processCount.webIsolated": 1,
+                    "dom.ipc.processCount.file": 1,
+                    "dom.ipc.processCount.extension": 1,
+                    "dom.ipc.processCount.privilegedabout": 1,
+                    "fission.autostart": False,
+                    "fission.webContentIsolationStrategy": 0,
+                    # -- software rendering only, no GPU paths --
+                    "gfx.webrender.software": True,
+                    "gfx.webrender.all": False,
+                    "layers.acceleration.disabled": True,
+                    "gfx.canvas.accelerated": False,
+                    # -- shrink caches (we solve, we don't browse) --
+                    "browser.cache.memory.capacity": 8192,
+                    "browser.cache.disk.enable": False,
+                    "browser.cache.offline.enable": False,
+                    "media.memory_cache_max_size": 8192,
+                    "image.mem.max_decoded_image_kb": 32768,
+                    "image.mem.surfacecache.max_size_kb": 32768,
+                    # -- no speculative network work --
+                    "network.prefetch-next": False,
+                    "network.dns.disablePrefetch": True,
+                    "network.predictor.enabled": False,
+                    "network.http.max-connections": 6,
+                    # -- WebRTC off: it was opening stray UDP ports on
+                    #    Render ("Detected new open ports UDP:43653") --
+                    "media.peerconnection.enabled": False,
+                    "media.navigator.enabled": False,
+                    # -- pure background noise we never use --
+                    "browser.sessionstore.resume_from_crash": False,
+                    "browser.safebrowsing.malware.enabled": False,
+                    "browser.safebrowsing.phishing.enabled": False,
+                    "toolkit.telemetry.enabled": False,
+                    "datareporting.healthreport.uploadEnabled": False,
+                    "browser.newtabpage.enabled": False,
                 },
-                args=[
-                    "--disable-dev-shm-usage",
-                    "--memory-pressure-off",
-                ],
             )
             self.browser = await self.camoufox_ctx.start()
-            logger.info(f"[Boot] step=browser_up t={time.time()-t0:.1f}s rss={_rss_mb()}MB")
+            logger.info(f"[Boot] step=browser_up t={time.time()-t0:.1f}s {_mem()}")
             self.context = await self.browser.new_context()
-            logger.info(f"[Boot] step=context t={time.time()-t0:.1f}s")
+            logger.info(f"[Boot] step=context t={time.time()-t0:.1f}s {_mem()}")
             page = await self.context.new_page()
-            logger.info(f"[Boot] step=page t={time.time()-t0:.1f}s")
+            logger.info(f"[Boot] step=page t={time.time()-t0:.1f}s {_mem()}")
             await self.page_pool.put(page)
             self.boot_error = None
             self.ready.set()
-            logger.success(f"[Boot] ready t={time.time()-t0:.1f}s rss={_rss_mb()}MB")
+            logger.success(f"[Boot] ready t={time.time()-t0:.1f}s {_mem()}")
 
     async def _acquire_page(self, timeout=None):
         """Boot the browser if needed, then lease the single page."""
