@@ -123,11 +123,17 @@ class TurnstileSolver:
                 headless=True,
                 humanize=False,
                 exclude_addons=[DefaultAddons.UBO],
+                # Render blocks unprivileged user namespaces, so Firefox's
+                # content sandbox cannot init (/proc/self/uid_map: EPERM) and
+                # renderer children SIGSEGV. Disable it via real Firefox prefs
+                # (--no-sandbox is a Chromium flag Firefox ignores).
+                firefox_user_prefs={
+                    "security.sandbox.content.level": 0,
+                    "security.sandbox.gpu.level": 0,
+                    "security.sandbox.socket.process.level": 0,
+                },
                 args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
-                    "--disable-gpu",
                     "--memory-pressure-off",
                 ],
             )
