@@ -211,7 +211,13 @@ class TurnstileSolver:
                     pass
 
                 await page.route(url_slash, lambda r: r.fulfill(body=html, status=200))
-                await page.goto(url_slash)
+                # The fulfilled document references Cloudflare's api.js, which
+                # may never fire "load" on a 0.1 vCPU box. Wait only for DOM
+                # and tolerate a timeout — the HTML is already in place.
+                try:
+                    await page.goto(url_slash, wait_until="domcontentloaded", timeout=25000)
+                except Exception as nav_err:
+                    logger.warning(f"[Turnstile] nav warning {task_id}: {str(nav_err)[:90]}")
                 await asyncio.sleep(3)
 
                 solved = False
