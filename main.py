@@ -349,7 +349,16 @@ class TurnstileSolver:
             )
             html = self.HTML_TEMPLATE.replace("<!-- cf turnstile -->", div)
 
-            for round_n in range(1, 3):
+            max_rounds = int(os.environ.get("SOLVE_ROUNDS", "2"))
+            # Hard wall-clock budget. On 0.1 vCPU a starved Playwright call can
+            # take far longer than its nominal timeout, which previously left a
+            # task stuck in "process" while holding the only page forever.
+            deadline = start + float(os.environ.get("SOLVE_DEADLINE", "150"))
+
+            for round_n in range(1, max_rounds + 1):
+                if time.time() >= deadline:
+                    logger.warning(f"[Turnstile] deadline reached {task_id}")
+                    break
                 try:
                     await page.unroute_all()
                 except Exception:
@@ -360,28 +369,28 @@ class TurnstileSolver:
                 # may never fire "load" on a 0.1 vCPU box. Wait only for DOM
                 # and tolerate a timeout — the HTML is already in place.
                 try:
-                    await page.goto(url_slash, wait_until="domcontentloaded", timeout=25000)
+                    await page.goto(url_slash, wait_until="domcontentloaded", timeout=20000)
                 except Exception as nav_err:
                     logger.warning(f"[Turnstile] nav warning {task_id}: {str(nav_err)[:90]}")
-                await asyncio.sleep(3)
 
-                solved = False
-                for _ in range(80):
-                    try:
-                        try:
-                            await page.click(".cf-turnstile", timeout=500)
-                        except Exception:
-                            pass
-                        val = await page.input_value("[name=cf-turnstile-response]", timeout=400)
-                        if val:
-                            elapsed = round(time.time() - start, 3)
-                            self.results[task_id] = {"status": "success", "elapsed_time": elapsed, "value": val}
-                            logger.info(f"[Turnstile] OK {task_id} ({elapsed}s) round={round_n}")
-                            solved = True
-                            return
-                    except Exception:
-                        pass
-                    await asyncio.sleep(0.3)
+                # Wait for the token to appear instead of clicking ~80 times.
+                # One wait_for_function is dramatically cheaper than a
+                # click/poll loop when the CPU is this starved.
+                try:
+                    remaining = max(5000, int((deadline - time.time()) * 1000))
+                    handle = await page.wait_for_function(
+                        "() => { const el = document.querySelector('[name=cf-turnstile-response]');"
+                        " return el && el.value && el.value.length > 20 ? el.value : false; }",
+                        timeout=remaining,
+                    )
+                    token = await handle.json_value()
+                    if token:
+                        elapsed = round(time.time() - start, 3)
+                        self.results[task_id] = {"status": "success", "elapsed_time": elapsed, "value": token}
+                        logger.info(f"[Turnstile] OK {task_id} ({elapsed}s) round={round_n}")
+                        return
+                except Exception as wf_err:
+                    logger.warning(f"[Turnstile] wait failed {task_id} round={round_n}: {str(wf_err)[:90]}")
 
                 logger.warning(f"[Turnstile] Round {round_n} failed — {task_id}")
 
