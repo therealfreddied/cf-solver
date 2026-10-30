@@ -35,6 +35,18 @@ def _sha8(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()[:8]
 
 
+def _rss_mb() -> int:
+    """This process's RSS in MB (Python only, not Firefox children)."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return -1
+
+
 def _total_rss_mb() -> int:
     """RSS summed across ALL processes in this container.
 
