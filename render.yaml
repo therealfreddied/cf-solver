@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: cf-solver
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: API_KEY
+        sync: false

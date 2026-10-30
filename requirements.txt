@@ -1,0 +1,4 @@
+camoufox
+fastapi
+uvicorn[standard]
+loguru
