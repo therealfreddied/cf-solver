@@ -35,6 +35,18 @@ def _sha8(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()[:8]
 
 
+def _rss_mb() -> int:
+    """Current process RSS in MB — cheap OOM visibility on a 512MB box."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return -1
+
+
 def verify_key(credentials: HTTPAuthorizationCredentials = Depends(security)):
     expected = _expected_key()
     got = credentials.credentials if credentials else ""
@@ -105,7 +117,8 @@ class TurnstileSolver:
         async with self._boot_lock:
             if self.ready.is_set():
                 return
-            logger.info("Starting headless Camoufox browser (single-thread mode)…")
+            t0 = time.time()
+            logger.info(f"[Boot] step=begin rss={_rss_mb()}MB cpu={os.cpu_count()}")
             self.camoufox_ctx = AsyncCamoufox(
                 headless=True,
                 humanize=False,
@@ -119,15 +132,20 @@ class TurnstileSolver:
                 ],
             )
             self.browser = await self.camoufox_ctx.start()
+            logger.info(f"[Boot] step=browser_up t={time.time()-t0:.1f}s rss={_rss_mb()}MB")
             self.context = await self.browser.new_context()
+            logger.info(f"[Boot] step=context t={time.time()-t0:.1f}s")
             page = await self.context.new_page()
+            logger.info(f"[Boot] step=page t={time.time()-t0:.1f}s")
             await self.page_pool.put(page)
             self.boot_error = None
             self.ready.set()
-            logger.success("Browser ready — 1 page in pool")
+            logger.success(f"[Boot] ready t={time.time()-t0:.1f}s rss={_rss_mb()}MB")
 
-    async def _acquire_page(self, timeout=180):
+    async def _acquire_page(self, timeout=None):
         """Boot the browser if needed, then lease the single page."""
+        if timeout is None:
+            timeout = int(os.environ.get("BOOT_TIMEOUT", "600"))
         try:
             await asyncio.wait_for(self._ensure_browser(), timeout=timeout)
         except asyncio.TimeoutError:
